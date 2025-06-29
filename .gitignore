@@ -1,0 +1,40 @@
+/.pytest_cache/
+/allure-report/
+/allure-results/
+/venv
+.idea
+/.env
+
+# Google API credentials
+service-account-key.json
+token.pickle
+service-account-key.json
+service_account_instructions.json
+
+# Project data files
+headings_data.json
+seo_results_*.json
+seo_parser.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+.venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
