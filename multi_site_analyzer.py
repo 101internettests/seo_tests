@@ -468,21 +468,65 @@ class MultiSiteAnalyzer:
             print(f"❌ Ошибка загрузки в Google Sheets: {e}")
     
     def send_telegram_report(self, sites_results: Dict[str, List[Dict]]):
-        """Отправка отчета в Telegram"""
+        """Отправка подробного отчета в Telegram с блоком изменений по каждому URL"""
         try:
             if not self.telegram_bot.bot_token or not self.telegram_bot.chat_id:
                 logger.warning("Telegram бот не настроен, пропускаем отправку отчета")
                 return
-            
-            success = self.telegram_bot.send_statistics(sites_results)
-            
+
+            # Формируем подробный отчет
+            report = "<b>📊 ОТЧЕТ ОБ АНАЛИЗЕ SEO</b>\n"
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            report += f"<i>{timestamp}</i>\n\n"
+
+            total_sites = len(sites_results)
+            total_pages = sum(len(site_data['results']) for site_data in sites_results.values())
+            successful_pages = 0
+            changes_block = ""
+            any_changes = False
+
+            report += f"<b>📈 ОБЩАЯ СТАТИСТИКА:</b>\n"
+            report += f"🌐 Сайтов: {total_sites}\n"
+            report += f"📄 Страниц: {total_pages}\n"
+
+            for site_key, site_data in sites_results.items():
+                site_info = site_data['site_info']
+                results = site_data['results']
+                site_successful = sum(1 for r in results if r.get('status') == 'success')
+                successful_pages += site_successful
+                site_success_percentage = (site_successful / len(results) * 100) if results else 0
+                report += f"\n<b>{site_info['name']}</b> ({site_key})\n"
+                report += f"📄 Страниц: {len(results)}\n"
+                report += f"✅ Успешно: {site_successful}\n"
+                report += f"❌ Ошибок: {len(results) - site_successful}\n"
+                report += f"📊 Успех: {site_success_percentage:.1f}%\n"
+                for result in results:
+                    if result.get('status') == 'success':
+                        comparison = result.get('comparison', {})
+                        if comparison.get('status') == 'changes_detected':
+                            any_changes = True
+                            changes_block += f"🔄 Изменения для {result['url']}:\n"
+                            for key, change in comparison.get('changes', {}).items():
+                                prev = change.get('previous', 0)
+                                curr = change.get('current', 0)
+                                diff = change.get('difference', 0)
+                                changes_block += f"  - {key}: {prev} → {curr} ({'+' if diff > 0 else ''}{diff})\n"
+                            changes_block += "\n"
+            success_percentage = (successful_pages / total_pages * 100) if total_pages > 0 else 0
+            report += f"\n📊 Процент успеха: {success_percentage:.1f}%\n"
+            if any_changes:
+                report += "\n<b>🔄 ИЗМЕНЕНИЯ:</b>\n" + changes_block
+            else:
+                report += "\n<b>🔄 ИЗМЕНЕНИЯ:</b>\nИзменений не обнаружено.\n"
+            report += "\n<i>🤖 Отправлено автоматически</i>"
+
+            success = self.telegram_bot.send_message(report)
             if success:
                 logger.info("Отчет успешно отправлен в Telegram")
                 print("📱 Отчет отправлен в Telegram")
             else:
                 logger.error("Ошибка отправки отчета в Telegram")
                 print("❌ Ошибка отправки отчета в Telegram")
-                
         except Exception as e:
             logger.error(f"Ошибка отправки в Telegram: {e}")
             print(f"❌ Ошибка отправки в Telegram: {e}")
