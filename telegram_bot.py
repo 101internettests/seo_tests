@@ -180,7 +180,7 @@ class TelegramBot:
 📈 Страниц с изменениями: {changes_count}"""
             
             message += f"""
-
+<i> 💥 Ссылка на отчет: https://docs.google.com/spreadsheets/d/1NTyI48H4woktkCqnvjGsMOWZbnqs8oCMMNP3j_AJDkw/edit?gid=1041857980#gid=1041857980 </i>"
 <i>🤖 Отправлено автоматически</i>"""
             
             # Отправляем основное сообщение
