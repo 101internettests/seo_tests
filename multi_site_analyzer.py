@@ -80,24 +80,47 @@ class SEOParser:
             logger.error(f"Ошибка анализа {url}: {e}")
         
         return result
-    
-    def _analyze_headings(self, soup: BeautifulSoup) -> Dict[str, int]:
-        """Анализ заголовков на странице"""
+
+    def _analyze_headings(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Анализ заголовков, title и description на странице"""
         headings = {}
-        
+
+        # Анализ заголовков H1-H6
         for i in range(1, 7):
             tag = f'h{i}'
             elements = soup.find_all(tag)
-            
+
             total_count = len(elements)
             non_empty_count = len([el for el in elements if el.get_text(strip=True)])
-            
+
             headings[f'{tag}_total'] = total_count
             headings[f'{tag}_non_empty'] = non_empty_count
-        
+
         # Общее количество заголовков
         headings['total_headings'] = sum(headings[f'h{i}_non_empty'] for i in range(1, 7))
+
+        # Подсчет title тегов с контентом (исключая содержащие "error")
+        title_tags = soup.find_all('title')
+        title_count = 0
+        for title in title_tags:
+            title_text = title.get_text(strip=True)
+            if title_text and 'error' not in title_text.lower():
+                title_count += 1
         
+        headings['title_count'] = title_count
+        headings['title_result'] = f"Title with content: {title_count}"
+
+        # Подсчет meta description тегов с контентом (исключая содержащие "error")
+        meta_descriptions = soup.find_all('meta', attrs={'name': 'description'})
+        description_count = 0
+        for meta in meta_descriptions:
+            content = meta.get('content', '').strip()
+            if content and 'error' not in content.lower():
+                description_count += 1
+        
+        headings['description_count'] = description_count
+        headings['description_result'] = f"Description with content: {description_count}"
+
         return headings
     
     def _compare_with_previous(self, url: str, current_headings: Dict[str, int]) -> Dict[str, Any]:
@@ -154,40 +177,110 @@ class SEOParser:
             for row in reversed(existing_data[1:]):  # Пропускаем заголовки, идем с конца
                 if len(row) >= 2 and row[1] == url:  # URL находится во втором столбце (B)
                     previous_data = row
+                    logger.info(f"Найдены предыдущие данные для {url}: {row}")
+                    logger.info(f"Длина строки: {len(row)}")
+                    logger.info(f"Title count (столбец 16): {row[15] if len(row) > 15 else 'N/A'}")
+                    logger.info(f"Description count (столбец 17): {row[16] if len(row) > 16 else 'N/A'}")
                     break
             
             if not previous_data:
+                logger.info(f"Предыдущих данных для {url} не найдено - это первая проверка")
                 return {
                     'status': 'no_previous_data',
                     'changes': {},
                     'errors': []
                 }
-            
+
             # Извлекаем данные о заголовках из предыдущего результата
             # Структура: [Дата, URL, Статус, H1_непустые, H2_непустые, ..., H1_всего, H2_всего, ...]
             try:
                 changes = {}
-                
+
                 # Непустые заголовки (столбцы 3-8)
                 for i in range(1, 7):
                     prev_value = int(previous_data[2 + i]) if len(previous_data) > 2 + i else 0
                     current_value = current_headings.get(f'h{i}_non_empty', 0)
-                    
+
                     # Вычисляем разницу
                     diff = current_value - prev_value
                     if diff != 0:
-                        changes[f'h{i}_non_empty'] = {'difference': diff, 'previous': prev_value, 'current': current_value}
-                
+                        changes[f'h{i}_non_empty'] = {'difference': diff, 'previous': prev_value,
+                                                      'current': current_value}
+
                 # Общие заголовки (столбцы 9-14)
                 for i in range(1, 7):
                     prev_value = int(previous_data[8 + i]) if len(previous_data) > 8 + i else 0
                     current_value = current_headings.get(f'h{i}_total', 0)
-                    
+
                     # Вычисляем разницу
                     diff = current_value - prev_value
                     if diff != 0:
                         changes[f'h{i}_total'] = {'difference': diff, 'previous': prev_value, 'current': current_value}
-                
+
+                # Проверяем изменения в количестве title (столбец 16)
+                if len(previous_data) > 15:
+                    try:
+                        # Проверяем, что данные не пустые и не являются строкой с пробелами
+                        prev_title_raw = previous_data[15]
+                        logger.info(f"Title count (столбец 16): {prev_title_raw} (тип: {type(prev_title_raw)})")
+                        
+                        if prev_title_raw and str(prev_title_raw).strip():
+                            prev_title_count = int(prev_title_raw)
+                            logger.info(f"Успешно преобразовано в int: {prev_title_count}")
+                        else:
+                            prev_title_count = 0
+                            logger.info(f"Title count в предыдущих данных пустой или некорректный: '{prev_title_raw}'")
+                        
+                        # Дополнительная отладка
+                        logger.info(f"DEBUG: prev_title_raw='{prev_title_raw}', prev_title_count={prev_title_count}")
+                    except (ValueError, TypeError) as e:
+                        prev_title_count = 0
+                        logger.warning(f"Ошибка парсинга title count '{previous_data[14]}': {e}")
+                    
+                    current_title_count = current_headings.get('title_count', 0)
+                    
+                    # Добавляем отладочную информацию
+                    logger.info(f"Сравнение title для {url}: предыдущее={prev_title_count}, текущее={current_title_count}")
+                    
+                    if prev_title_count != current_title_count:
+                        changes['title_count'] = {
+                            'difference': current_title_count - prev_title_count,
+                            'previous': prev_title_count,
+                            'current': current_title_count
+                        }
+
+                # Проверяем изменения в количестве description (столбец 17)
+                if len(previous_data) > 16:
+                    try:
+                        # Проверяем, что данные не пустые и не являются строкой с пробелами
+                        prev_description_raw = previous_data[16]
+                        logger.info(f"Description count (столбец 17): {prev_description_raw} (тип: {type(prev_description_raw)})")
+                        
+                        if prev_description_raw and str(prev_description_raw).strip():
+                            prev_description_count = int(prev_description_raw)
+                            logger.info(f"Успешно преобразовано в int: {prev_description_count}")
+                        else:
+                            prev_description_count = 0
+                            logger.info(f"Description count в предыдущих данных пустой или некорректный: '{prev_description_raw}'")
+                        
+                        # Дополнительная отладка
+                        logger.info(f"DEBUG: prev_description_raw='{prev_description_raw}', prev_description_count={prev_description_count}")
+                    except (ValueError, TypeError) as e:
+                        prev_description_count = 0
+                        logger.warning(f"Ошибка парсинга description count '{previous_data[15]}': {e}")
+                    
+                    current_description_count = current_headings.get('description_count', 0)
+                    
+                    # Добавляем отладочную информацию
+                    logger.info(f"Сравнение description для {url}: предыдущее={prev_description_count}, текущее={current_description_count}")
+                    
+                    if prev_description_count != current_description_count:
+                        changes['description_count'] = {
+                            'difference': current_description_count - prev_description_count,
+                            'previous': prev_description_count,
+                            'current': current_description_count
+                        }
+
                 if changes:
                     return {
                         'status': 'changes_detected',
@@ -386,6 +479,16 @@ class MultiSiteAnalyzer:
                         
                         if total > 0:
                             print(f"        {tag.upper()}: {non_empty} (всего: {total})")
+
+                    # Показываем информацию о Title и Description
+                    title_count = headings.get('title_count', 0)
+                    title_result = headings.get('title_result', '')
+                    description_count = headings.get('description_count', 0)
+                    description_result = headings.get('description_result', '')
+
+                    print("      📝 Title и Description:")
+                    print(f"        Title: {title_result}")
+                    print(f"        Description: {description_result}")
                     
                     # Проверяем сравнение
                     if 'comparison' in result:
@@ -468,65 +571,29 @@ class MultiSiteAnalyzer:
             print(f"❌ Ошибка загрузки в Google Sheets: {e}")
     
     def send_telegram_report(self, sites_results: Dict[str, List[Dict]]):
-        """Отправка подробного отчета в Telegram с блоком изменений по каждому URL"""
+        """Отправка отчета в Telegram"""
         try:
             if not self.telegram_bot.bot_token or not self.telegram_bot.chat_id:
                 logger.warning("Telegram бот не настроен, пропускаем отправку отчета")
                 return
 
-            # Формируем подробный отчет
-            report = "<b>📊 ОТЧЕТ ОБ АНАЛИЗЕ SEO</b>\n"
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            report += f"<i>{timestamp}</i>\n\n"
-
-            total_sites = len(sites_results)
-            total_pages = sum(len(site_data['results']) for site_data in sites_results.values())
-            successful_pages = 0
-            changes_block = ""
-            any_changes = False
-
-            report += f"<b>📈 ОБЩАЯ СТАТИСТИКА:</b>\n"
-            report += f"🌐 Сайтов: {total_sites}\n"
-            report += f"📄 Страниц: {total_pages}\n"
-
-            for site_key, site_data in sites_results.items():
-                site_info = site_data['site_info']
-                results = site_data['results']
-                site_successful = sum(1 for r in results if r.get('status') == 'success')
-                successful_pages += site_successful
-                site_success_percentage = (site_successful / len(results) * 100) if results else 0
-                report += f"\n<b>{site_info['name']}</b> ({site_key})\n"
-                report += f"📄 Страниц: {len(results)}\n"
-                report += f"✅ Успешно: {site_successful}\n"
-                report += f"❌ Ошибок: {len(results) - site_successful}\n"
-                report += f"📊 Успех: {site_success_percentage:.1f}%\n"
-                for result in results:
-                    if result.get('status') == 'success':
-                        comparison = result.get('comparison', {})
-                        if comparison.get('status') == 'changes_detected':
-                            any_changes = True
-                            changes_block += f"🔄 Изменения для {result['url']}:\n"
-                            for key, change in comparison.get('changes', {}).items():
-                                prev = change.get('previous', 0)
-                                curr = change.get('current', 0)
-                                diff = change.get('difference', 0)
-                                changes_block += f"  - {key}: {prev} → {curr} ({'+' if diff > 0 else ''}{diff})\n"
-                            changes_block += "\n"
-            success_percentage = (successful_pages / total_pages * 100) if total_pages > 0 else 0
-            report += f"\n📊 Процент успеха: {success_percentage:.1f}%\n"
-            if any_changes:
-                report += "\n<b>🔄 ИЗМЕНЕНИЯ:</b>\n" + changes_block
-            else:
-                report += "\n<b>🔄 ИЗМЕНЕНИЯ:</b>\nИзменений не обнаружено.\n"
-            report += "\n<i>🤖 Отправлено автоматически</i>"
-
-            success = self.telegram_bot.send_message(report)
+            # Отправляем основную статистику
+            success = self.telegram_bot.send_statistics(sites_results)
             if success:
-                logger.info("Отчет успешно отправлен в Telegram")
-                print("📱 Отчет отправлен в Telegram")
+                logger.info("Основная статистика отправлена в Telegram")
+                print("📱 Основная статистика отправлена в Telegram")
             else:
-                logger.error("Ошибка отправки отчета в Telegram")
-                print("❌ Ошибка отправки отчета в Telegram")
+                logger.error("Ошибка отправки основной статистики в Telegram")
+                print("❌ Ошибка отправки основной статистики в Telegram")
+
+            # Отправляем детальные изменения, если они есть
+            changes_success = self.telegram_bot.send_detailed_changes(sites_results)
+            if changes_success:
+                logger.info("Детальные изменения отправлены в Telegram")
+                print("📱 Детальные изменения отправлены в Telegram")
+            else:
+                logger.info("Детальные изменения не отправлены (нет изменений или ошибка)")
+
         except Exception as e:
             logger.error(f"Ошибка отправки в Telegram: {e}")
             print(f"❌ Ошибка отправки в Telegram: {e}")
@@ -568,6 +635,10 @@ class MultiSiteAnalyzer:
             'h2_count': headings.get('h2_non_empty', 0),
             'h3_count': headings.get('h3_non_empty', 0),
             'total_headings': headings.get('total_headings', 0),
+            'title_count': headings.get('title_count', 0),
+            'title_result': headings.get('title_result', ''),
+            'description_count': headings.get('description_count', 0),
+            'description_result': headings.get('description_result', ''),
             'error': result.get('error'),
         }
 
@@ -682,4 +753,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

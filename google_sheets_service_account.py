@@ -188,6 +188,8 @@ class GoogleSheetsServiceAccount:
             'H4 (всего)',
             'H5 (всего)',
             'H6 (всего)',
+            'Title count',
+            'Description count',
             'Сравнение статус',
             'Ошибки',
             'Изменения'
@@ -223,6 +225,10 @@ class GoogleSheetsServiceAccount:
             # Общее количество заголовков
             for i in range(1, 7):
                 row.append(headings.get(f'h{i}_total', 0))
+            
+            # Title и Description count
+            row.append(headings.get('title_count', 0))
+            row.append(headings.get('description_count', 0))
             
             # Статус сравнения
             comparison = result.get('comparison', {})
@@ -264,8 +270,8 @@ class GoogleSheetsServiceAccount:
             # Форматируем данные для таблицы
             formatted_data = self.format_results_for_sheet(results)
             
-            # Определяем диапазон для записи (18 столбцов: A-R)
-            range_name = f'{sheet_name}!A:R'
+            # Определяем диапазон для записи (20 столбцов: A-T)
+            range_name = f'{sheet_name}!A:T'
             
             # Добавляем данные в конец таблицы
             result = self.append_data(spreadsheet_id, range_name, formatted_data)

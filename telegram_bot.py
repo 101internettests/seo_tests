@@ -71,14 +71,14 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Ошибка отправки в Telegram: {e}")
             return False
-    
+
     def send_statistics(self, sites_results: Dict[str, Any]) -> bool:
         """
         Отправка статистики анализа в Telegram
-        
+
         Args:
             sites_results: Результаты анализа сайтов
-            
+
         Returns:
             True если сообщение отправлено успешно, False в противном случае
         """
@@ -87,19 +87,39 @@ class TelegramBot:
             total_sites = len(sites_results)
             total_pages = sum(len(site_data['results']) for site_data in sites_results.values())
             successful_pages = 0
-            
+
             # Подсчитываем успешные страницы
             for site_data in sites_results.values():
                 for result in site_data['results']:
                     if result.get('status') == 'success':
                         successful_pages += 1
-            
+
             # Вычисляем процент успеха
             success_percentage = (successful_pages / total_pages * 100) if total_pages > 0 else 0
-            
+
+            # Подсчитываем статистику по SEO элементам
+            pages_with_title = 0
+            pages_with_description = 0
+            total_title_count = 0
+            total_description_count = 0
+
+            for site_data in sites_results.values():
+                for result in site_data['results']:
+                    if result.get('status') == 'success' and 'headings' in result:
+                        headings = result['headings']
+                        title_count = headings.get('title_count', 0)
+                        description_count = headings.get('description_count', 0)
+                        
+                        if title_count > 0:
+                            pages_with_title += 1
+                            total_title_count += title_count
+                        if description_count > 0:
+                            pages_with_description += 1
+                            total_description_count += description_count
+
             # Формируем сообщение
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
+
             message = f"""
 <b>📊 ОТЧЕТ ОБ АНАЛИЗЕ SEO</b>
 <i>{timestamp}</i>
@@ -111,10 +131,18 @@ class TelegramBot:
 ❌ Ошибок: {total_pages - successful_pages}
 📊 Процент успеха: {success_percentage:.1f}%
 
+<b>🔍 SEO ЭЛЕМЕНТЫ:</b>
+📝 Title: {pages_with_title}/{successful_pages} ({(pages_with_title/successful_pages*100) if successful_pages > 0 else 0:.1f}%)
+📄 Description: {pages_with_description}/{successful_pages} ({(pages_with_description/successful_pages*100) if successful_pages > 0 else 0:.1f}%)
+
 <b>🌐 ДЕТАЛИ ПО САЙТАМ:</b>"""
 
-            # Добавляем информацию по каждому сайту
+            # Добавляем информацию по каждому сайту (ограничиваем количество)
+            site_count = 0
             for site_key, site_data in sites_results.items():
+                if site_count >= 5:  # Ограничиваем до 5 сайтов в основном сообщении
+                    break
+                    
                 site_info = site_data['site_info']
                 results = site_data['results']
                 
@@ -128,39 +156,53 @@ class TelegramBot:
 ✅ Успешно: {site_successful}
 ❌ Ошибок: {len(results) - site_successful}
 📊 Успех: {site_success_percentage:.1f}%"""
+                
+                site_count += 1
             
-            # Добавляем информацию об изменениях
-            total_changes = 0
+            if len(sites_results) > 5:
+                message += f"""
+
+... и еще {len(sites_results) - 5} сайтов"""
+            
+            # Добавляем краткую информацию об изменениях
+            changes_count = 0
             for site_data in sites_results.values():
                 for result in site_data['results']:
                     if result.get('status') == 'success' and 'comparison' in result:
                         comparison = result['comparison']
                         if comparison.get('status') == 'changes_detected':
-                            total_changes += 1
+                            changes_count += 1
             
-            if total_changes > 0:
+            if changes_count > 0:
                 message += f"""
 
 <b>🔄 ИЗМЕНЕНИЯ:</b>
-📈 Страниц с изменениями: {total_changes}"""
+📈 Страниц с изменениями: {changes_count}"""
             
             message += f"""
 
 <i>🤖 Отправлено автоматически</i>"""
             
-            return self.send_message(message)
+            # Отправляем основное сообщение
+            success = self.send_message(message)
+            
+            # Если есть изменения, отправляем детали отдельным сообщением
+            if changes_count > 0:
+                self.send_detailed_changes(sites_results)
+            
+            return success
             
         except Exception as e:
             logger.error(f"Ошибка формирования статистики для Telegram: {e}")
             return False
-    
+
     def send_error_notification(self, error_message: str) -> bool:
         """
         Отправка уведомления об ошибке
-        
+
         Args:
             error_message: Сообщение об ошибке
-            
+
         Returns:
             True если сообщение отправлено успешно, False в противном случае
         """
@@ -172,5 +214,79 @@ class TelegramBot:
 {error_message}
 
 <i>🤖 Отправлено автоматически</i>"""
-        
-        return self.send_message(message) 
+
+        return self.send_message(message)
+
+    def send_detailed_changes(self, sites_results: Dict[str, Any]) -> bool:
+        """
+        Отправка детальных изменений в Telegram
+
+        Args:
+            sites_results: Результаты анализа сайтов
+
+        Returns:
+            True если сообщение отправлено успешно, False в противном случае
+        """
+        try:
+            # Собираем все изменения
+            changes_details = []
+            
+            for site_data in sites_results.values():
+                for result in site_data['results']:
+                    if result.get('status') == 'success' and 'comparison' in result:
+                        comparison = result['comparison']
+                        if comparison.get('status') == 'changes_detected':
+                            url = result.get('url', 'Неизвестная ссылка')
+                            changes = comparison.get('changes', {})
+                            
+                            # Формируем детали изменений для этой страницы
+                            page_changes = []
+                            for change_type, change_data in changes.items():
+                                if isinstance(change_data, dict) and 'difference' in change_data:
+                                    diff = change_data['difference']
+                                    if diff > 0:
+                                        page_changes.append(f"➕ {change_type}: +{diff}")
+                                    elif diff < 0:
+                                        page_changes.append(f"➖ {change_type}: {diff}")
+                                elif isinstance(change_data, dict) and change_data.get('type') == 'content_change':
+                                    page_changes.append(f"🔄 {change_type}: изменено содержимое")
+                            
+                            if page_changes:
+                                changes_details.append(f"🔗 {url}\n" + "\n".join(f"   {change}" for change in page_changes))
+            
+            if not changes_details:
+                return True  # Нет изменений для отправки
+            
+            # Формируем сообщение с деталями
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            message = f"""
+<b>🔄 ДЕТАЛЬНЫЕ ИЗМЕНЕНИЯ</b>
+<i>{timestamp}</i>
+
+"""
+            
+            # Добавляем изменения, разбивая на части если нужно
+            current_message = message
+            for detail in changes_details:
+                # Проверяем, не превышает ли сообщение лимит Telegram (4096 символов)
+                if len(current_message + detail) > 4000:  # Оставляем запас
+                    # Отправляем текущее сообщение
+                    self.send_message(current_message + "\n<i>🤖 Отправлено автоматически</i>")
+                    # Начинаем новое сообщение
+                    current_message = f"""
+<b>🔄 ДЕТАЛЬНЫЕ ИЗМЕНЕНИЯ (продолжение)</b>
+<i>{timestamp}</i>
+
+{detail}"""
+                else:
+                    current_message += f"\n{detail}"
+            
+            # Отправляем последнее сообщение
+            if current_message != message:
+                return self.send_message(current_message + "\n<i>🤖 Отправлено автоматически</i>")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки детальных изменений в Telegram: {e}")
+            return False

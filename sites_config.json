@@ -316,7 +316,7 @@
   },
   "default_settings": {
     "spreadsheet_id": "1NTyI48H4woktkCqnvjGsMOWZbnqs8oCMMNP3j_AJDkw",
-    "sheet_name": "Лист1",
+    "sheet_name": "Лист2",
     "upload_to_sheets": true,
     "save_local": true,
     "delay_between_requests": 2,

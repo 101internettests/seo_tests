@@ -56,10 +56,16 @@ class TestMultiSiteAnalyzer:
         mock_response = Mock()
         mock_response.text = """
         <html>
-            <h1>Заголовок 1</h1>
-            <h2>Заголовок 2</h2>
-            <h3>Заголовок 3</h3>
-            <p>Обычный текст</p>
+            <head>
+                <title>Test Page Title</title>
+                <meta name="description" content="Test page description">
+            </head>
+            <body>
+                <h1>Заголовок 1</h1>
+                <h2>Заголовок 2</h2>
+                <h3>Заголовок 3</h3>
+                <p>Обычный текст</p>
+            </body>
         </html>
         """
         mock_response.status_code = 200
@@ -73,6 +79,10 @@ class TestMultiSiteAnalyzer:
         assert result['h2_count'] == 1
         assert result['h3_count'] == 1
         assert result['total_headings'] == 3
+        assert result['title_count'] == 1
+        assert result['title_result'] == "Title with content: 1"
+        assert result['description_count'] == 1
+        assert result['description_result'] == "Description with content: 1"
     
     @patch('multi_site_analyzer.requests.get')
     def test_analyze_url_with_error(self, mock_get, analyzer):
@@ -84,6 +94,33 @@ class TestMultiSiteAnalyzer:
         assert result['url'] == "https://test.com"
         assert result['error'] == "Connection error"
         assert result['status_code'] is None
+
+    @patch('multi_site_analyzer.requests.get')
+    def test_analyze_url_with_error_title(self, mock_get, analyzer):
+        """Тест анализа URL с title содержащим 'error'"""
+        mock_response = Mock()
+        mock_response.text = """
+        <html>
+            <head>
+                <title>Error Page</title>
+                <meta name="description" content="Test page description">
+            </head>
+            <body>
+                <h1>Заголовок 1</h1>
+            </body>
+        </html>
+        """
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+        
+        result = analyzer.analyze_url("https://test.com")
+        
+        assert result['url'] == "https://test.com"
+        assert result['status_code'] == 200
+        assert result['title_count'] == 0  # Title с "error" должен быть исключен
+        assert result['title_result'] == "Title with content: 0"
+        assert result['description_count'] == 1
+        assert result['description_result'] == "Description with content: 1"
     
     def test_get_site_urls(self, analyzer):
         """Тест получения URL сайта"""
