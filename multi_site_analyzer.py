@@ -22,6 +22,28 @@ from telegram_bot import TelegramBot
 logger = logging.getLogger(__name__)
 
 
+# Подсказки для распознавания страниц защиты и типичных страниц ошибок
+_PROTECTION_HINTS = [
+    'just a moment',
+    'ddos protection',
+    'cloudflare',
+    'captcha',
+    'please enable cookies'
+]
+
+_ERROR_PAGE_HINTS = [
+    '404',
+    'not found',
+    'ошибка',
+    'server error',
+    'page not found',
+    'access denied',
+    'forbidden',
+    'bad gateway',
+    'service unavailable'
+]
+
+
 class SEOParser:
     """Простой SEO парсер для анализа заголовков"""
     
@@ -54,27 +76,55 @@ class SEOParser:
         }
         
         try:
-            # Получаем страницу
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Парсим HTML
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Анализируем заголовки
-            headings = self._analyze_headings(soup)
-            
-            result.update({
-                'status': 'success',
-                'status_code': response.status_code,
-                'headings': headings,
-                'comparison': self._compare_with_previous(url, headings)
-            })
-            
-            # Задержка между запросами
-            if self.delay_between_requests > 0:
-                time.sleep(self.delay_between_requests)
-                
+            max_retries = 2
+            backoff_seconds = 0.7
+            last_error = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    # Используем requests.get, чтобы удобнее было мокать в тестах
+                    response = requests.get(
+                        url,
+                        headers=self.session.headers,
+                        timeout=30
+                    )
+
+                    # Повторяем при временных серверных ошибках
+                    if 500 <= response.status_code < 600:
+                        raise requests.exceptions.HTTPError(f"Server error {response.status_code}")
+
+                    text_lower = (response.text or '').lower()
+                    if any(hint in text_lower for hint in _PROTECTION_HINTS):
+                        raise RuntimeError("Temporary protection or captcha page detected")
+
+                    # Парсим HTML
+                    soup = BeautifulSoup(response.content, 'html.parser')
+
+                    # Анализируем заголовки
+                    headings = self._analyze_headings(soup)
+
+                    result.update({
+                        'status': 'success',
+                        'status_code': response.status_code,
+                        'headings': headings,
+                        'comparison': self._compare_with_previous(url, headings)
+                    })
+
+                    # Задержка между запросами после успешного запроса
+                    if self.delay_between_requests > 0:
+                        time.sleep(self.delay_between_requests)
+
+                    last_error = None
+                    break
+
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, RuntimeError) as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        time.sleep(backoff_seconds * (2 ** attempt))
+                        continue
+                    else:
+                        raise
+
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"Ошибка анализа {url}: {e}")
@@ -99,23 +149,27 @@ class SEOParser:
         # Общее количество заголовков
         headings['total_headings'] = sum(headings[f'h{i}_non_empty'] for i in range(1, 7))
 
-        # Подсчет title тегов с контентом (исключая содержащие "error")
+        # Подсчет title тегов с контентом (исключая типичные страницы ошибок, но не любое слово "error")
         title_tags = soup.find_all('title')
         title_count = 0
         for title in title_tags:
-            title_text = title.get_text(strip=True)
-            if title_text and 'error' not in title_text.lower():
+            title_text = (title.get_text(strip=True) or '')
+            title_text_lower = title_text.lower()
+            is_typical_error = any(hint in title_text_lower for hint in _ERROR_PAGE_HINTS)
+            if title_text and not is_typical_error:
                 title_count += 1
         
         headings['title_count'] = title_count
         headings['title_result'] = f"Title with content: {title_count}"
 
-        # Подсчет meta description тегов с контентом (исключая содержащие "error")
+        # Подсчет meta description тегов с контентом (исключая типичные страницы ошибок)
         meta_descriptions = soup.find_all('meta', attrs={'name': 'description'})
         description_count = 0
         for meta in meta_descriptions:
-            content = meta.get('content', '').strip()
-            if content and 'error' not in content.lower():
+            content = (meta.get('content', '') or '').strip()
+            content_lower = content.lower()
+            is_typical_error = any(hint in content_lower for hint in _ERROR_PAGE_HINTS)
+            if content and not is_typical_error:
                 description_count += 1
         
         headings['description_count'] = description_count
@@ -154,7 +208,7 @@ class SEOParser:
                 }
             
             # Получаем все данные из таблицы
-            range_name = f'{sheet_name}!A:R'
+            range_name = f'{sheet_name}!A:T'
             try:
                 existing_data = self.sheets_manager.get_sheet_data(spreadsheet_id, range_name)
             except Exception as e:
@@ -172,16 +226,32 @@ class SEOParser:
                     'errors': []
                 }
             
+            # Строим карту названий столбцов -> индекс
+            headers = existing_data[0]
+            header_to_index = {str(h).strip().lower(): idx for idx, h in enumerate(headers)}
+
+            def find_idx(candidates):
+                for name in candidates:
+                    key = str(name).strip().lower()
+                    if key in header_to_index:
+                        return header_to_index[key]
+                return None
+
+            url_idx = find_idx(['url'])
+
             # Ищем последние данные для этого URL
             previous_data = None
-            for row in reversed(existing_data[1:]):  # Пропускаем заголовки, идем с конца
-                if len(row) >= 2 and row[1] == url:  # URL находится во втором столбце (B)
-                    previous_data = row
-                    logger.info(f"Найдены предыдущие данные для {url}: {row}")
-                    logger.info(f"Длина строки: {len(row)}")
-                    logger.info(f"Title count (столбец 16): {row[15] if len(row) > 15 else 'N/A'}")
-                    logger.info(f"Description count (столбец 17): {row[16] if len(row) > 16 else 'N/A'}")
-                    break
+            if url_idx is not None:
+                for row in reversed(existing_data[1:]):  # Пропускаем заголовки, идем с конца
+                    if len(row) > url_idx and row[url_idx] == url:
+                        previous_data = row
+                        break
+            else:
+                # Fallback: прежняя логика со вторым столбцом
+                for row in reversed(existing_data[1:]):
+                    if len(row) >= 2 and row[1] == url:
+                        previous_data = row
+                        break
             
             if not previous_data:
                 logger.info(f"Предыдущих данных для {url} не найдено - это первая проверка")
@@ -192,94 +262,112 @@ class SEOParser:
                 }
 
             # Извлекаем данные о заголовках из предыдущего результата
-            # Структура: [Дата, URL, Статус, H1_непустые, H2_непустые, ..., H1_всего, H2_всего, ...]
+            # Предпочитаем поиск по названиям колонок; при отсутствии — мягкий fallback на индексы
             try:
                 changes = {}
-
-                # Непустые заголовки (столбцы 3-8)
+                # Непустые заголовки
                 for i in range(1, 7):
-                    prev_value = int(previous_data[2 + i]) if len(previous_data) > 2 + i else 0
+                    non_empty_idx = find_idx([f'H{i} (непустые)', f'h{i}_непустые', f'h{i}_non_empty'])
+                    if non_empty_idx is not None and len(previous_data) > non_empty_idx:
+                        try:
+                            prev_value = int(str(previous_data[non_empty_idx]).strip())
+                        except (ValueError, TypeError):
+                            prev_value = 0
+                    else:
+                        # fallback по индексам: 3..8 (0-баз)
+                        idx = 2 + i
+                        try:
+                            prev_value = int(previous_data[idx]) if len(previous_data) > idx else 0
+                        except (ValueError, TypeError):
+                            prev_value = 0
+
                     current_value = current_headings.get(f'h{i}_non_empty', 0)
-
-                    # Вычисляем разницу
                     diff = current_value - prev_value
                     if diff != 0:
-                        changes[f'h{i}_non_empty'] = {'difference': diff, 'previous': prev_value,
-                                                      'current': current_value}
+                        changes[f'h{i}_non_empty'] = {
+                            'difference': diff,
+                            'previous': prev_value,
+                            'current': current_value
+                        }
 
-                # Общие заголовки (столбцы 9-14)
+                # Общие заголовки
                 for i in range(1, 7):
-                    prev_value = int(previous_data[8 + i]) if len(previous_data) > 8 + i else 0
-                    current_value = current_headings.get(f'h{i}_total', 0)
+                    total_idx = find_idx([f'H{i} (всего)', f'h{i}_всего', f'h{i}_total'])
+                    if total_idx is not None and len(previous_data) > total_idx:
+                        try:
+                            prev_value = int(str(previous_data[total_idx]).strip())
+                        except (ValueError, TypeError):
+                            prev_value = 0
+                    else:
+                        # fallback по индексам: 10..15 (0-баз) — соответствуют h1..h6 total
+                        idx = 8 + i
+                        try:
+                            prev_value = int(previous_data[idx]) if len(previous_data) > idx else 0
+                        except (ValueError, TypeError):
+                            prev_value = 0
 
-                    # Вычисляем разницу
+                    current_value = current_headings.get(f'h{i}_total', 0)
                     diff = current_value - prev_value
                     if diff != 0:
-                        changes[f'h{i}_total'] = {'difference': diff, 'previous': prev_value, 'current': current_value}
+                        changes[f'h{i}_total'] = {
+                            'difference': diff,
+                            'previous': prev_value,
+                            'current': current_value
+                        }
 
-                # Проверяем изменения в количестве title (столбец 16)
-                if len(previous_data) > 15:
+                # Title count
+                title_idx = find_idx(['title count', 'title_count'])
+                prev_title_count = 0
+                if title_idx is not None and len(previous_data) > title_idx:
                     try:
-                        # Проверяем, что данные не пустые и не являются строкой с пробелами
-                        prev_title_raw = previous_data[15]
-                        logger.info(f"Title count (столбец 16): {prev_title_raw} (тип: {type(prev_title_raw)})")
-                        
-                        if prev_title_raw and str(prev_title_raw).strip():
-                            prev_title_count = int(prev_title_raw)
-                            logger.info(f"Успешно преобразовано в int: {prev_title_count}")
-                        else:
-                            prev_title_count = 0
-                            logger.info(f"Title count в предыдущих данных пустой или некорректный: '{prev_title_raw}'")
-                        
-                        # Дополнительная отладка
-                        logger.info(f"DEBUG: prev_title_raw='{prev_title_raw}', prev_title_count={prev_title_count}")
-                    except (ValueError, TypeError) as e:
+                        raw = previous_data[title_idx]
+                        if raw and str(raw).strip():
+                            prev_title_count = int(str(raw).strip())
+                    except (ValueError, TypeError):
                         prev_title_count = 0
-                        logger.warning(f"Ошибка парсинга title count '{previous_data[14]}': {e}")
-                    
-                    current_title_count = current_headings.get('title_count', 0)
-                    
-                    # Добавляем отладочную информацию
-                    logger.info(f"Сравнение title для {url}: предыдущее={prev_title_count}, текущее={current_title_count}")
-                    
-                    if prev_title_count != current_title_count:
-                        changes['title_count'] = {
-                            'difference': current_title_count - prev_title_count,
-                            'previous': prev_title_count,
-                            'current': current_title_count
-                        }
-
-                # Проверяем изменения в количестве description (столбец 17)
-                if len(previous_data) > 16:
+                elif len(previous_data) > 15:
+                    # fallback прежний столбец 16 (0-баз 15)
                     try:
-                        # Проверяем, что данные не пустые и не являются строкой с пробелами
-                        prev_description_raw = previous_data[16]
-                        logger.info(f"Description count (столбец 17): {prev_description_raw} (тип: {type(prev_description_raw)})")
-                        
-                        if prev_description_raw and str(prev_description_raw).strip():
-                            prev_description_count = int(prev_description_raw)
-                            logger.info(f"Успешно преобразовано в int: {prev_description_count}")
-                        else:
-                            prev_description_count = 0
-                            logger.info(f"Description count в предыдущих данных пустой или некорректный: '{prev_description_raw}'")
-                        
-                        # Дополнительная отладка
-                        logger.info(f"DEBUG: prev_description_raw='{prev_description_raw}', prev_description_count={prev_description_count}")
-                    except (ValueError, TypeError) as e:
+                        raw = previous_data[15]
+                        if raw and str(raw).strip():
+                            prev_title_count = int(str(raw).strip())
+                    except (ValueError, TypeError):
+                        prev_title_count = 0
+
+                current_title_count = current_headings.get('title_count', 0)
+                if prev_title_count != current_title_count:
+                    changes['title_count'] = {
+                        'difference': current_title_count - prev_title_count,
+                        'previous': prev_title_count,
+                        'current': current_title_count
+                    }
+
+                # Description count
+                description_idx = find_idx(['description count', 'description_count'])
+                prev_description_count = 0
+                if description_idx is not None and len(previous_data) > description_idx:
+                    try:
+                        raw = previous_data[description_idx]
+                        if raw and str(raw).strip():
+                            prev_description_count = int(str(raw).strip())
+                    except (ValueError, TypeError):
                         prev_description_count = 0
-                        logger.warning(f"Ошибка парсинга description count '{previous_data[15]}': {e}")
-                    
-                    current_description_count = current_headings.get('description_count', 0)
-                    
-                    # Добавляем отладочную информацию
-                    logger.info(f"Сравнение description для {url}: предыдущее={prev_description_count}, текущее={current_description_count}")
-                    
-                    if prev_description_count != current_description_count:
-                        changes['description_count'] = {
-                            'difference': current_description_count - prev_description_count,
-                            'previous': prev_description_count,
-                            'current': current_description_count
-                        }
+                elif len(previous_data) > 16:
+                    # fallback прежний столбец 17 (0-баз 16)
+                    try:
+                        raw = previous_data[16]
+                        if raw and str(raw).strip():
+                            prev_description_count = int(str(raw).strip())
+                    except (ValueError, TypeError):
+                        prev_description_count = 0
+
+                current_description_count = current_headings.get('description_count', 0)
+                if prev_description_count != current_description_count:
+                    changes['description_count'] = {
+                        'difference': current_description_count - prev_description_count,
+                        'previous': prev_description_count,
+                        'current': current_description_count
+                    }
 
                 if changes:
                     return {
