@@ -3,6 +3,7 @@ import requests
 import logging
 from typing import Dict, Any
 from datetime import datetime
+import time
 
 # Попытка загрузить .env файл
 try:
@@ -26,6 +27,9 @@ class TelegramBot:
         """
         self.bot_token = bot_token or os.getenv('BOT_TOKEN')
         self.chat_id = chat_id or os.getenv('CHAT_ID')
+        # Временная защита от дублей ошибок (по сообщению, в пределах окна времени)
+        self._last_error_fingerprint = None
+        self._last_error_ts = 0.0
         
         if not self.bot_token:
             logger.warning("BOT_TOKEN не найден в переменных окружения")
@@ -206,6 +210,17 @@ class TelegramBot:
         Returns:
             True если сообщение отправлено успешно, False в противном случае
         """
+        # Дедупликация: не отправляем одинаковое сообщение чаще, чем раз в 60 секунд
+        try:
+            normalized = ' '.join((error_message or '').split())
+            now_ts = time.time()
+            if self._last_error_fingerprint == normalized and (now_ts - self._last_error_ts) < 60:
+                logger.info("Пропускаем дублирующее уведомление об ошибке (менее 60с)")
+                return True
+        except Exception:
+            # В случае любой ошибки в дедупликации просто продолжаем обычную отправку
+            pass
+
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         message = f"""
 <b>⚠️ ОШИБКА АНАЛИЗА</b>
@@ -214,8 +229,14 @@ class TelegramBot:
 {error_message}
 
 <i>🤖 Отправлено автоматически</i>"""
-
-        return self.send_message(message)
+        success = self.send_message(message)
+        if success:
+            try:
+                self._last_error_fingerprint = ' '.join((error_message or '').split())
+                self._last_error_ts = time.time()
+            except Exception:
+                pass
+        return success
 
     def send_detailed_changes(self, sites_results: Dict[str, Any]) -> bool:
         """

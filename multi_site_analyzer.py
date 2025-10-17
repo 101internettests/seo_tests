@@ -832,11 +832,19 @@ def main():
             
     except KeyboardInterrupt:
         print("\n⏹️ Анализ прерван пользователем")
-        analyzer.send_telegram_error("Анализ прерван пользователем")
+        try:
+            if 'analyzer' in locals() and getattr(analyzer, 'telegram_bot', None):
+                analyzer.send_telegram_error("Анализ прерван пользователем")
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
         print(f"❌ Критическая ошибка: {e}")
-        analyzer.send_telegram_error(f"Критическая ошибка: {e}")
+        try:
+            if 'analyzer' in locals() and getattr(analyzer, 'telegram_bot', None):
+                analyzer.send_telegram_error(f"Критическая ошибка: {e}")
+        except Exception:
+            pass
         sys.exit(1)
 
 
