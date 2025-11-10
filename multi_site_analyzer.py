@@ -47,14 +47,27 @@ _ERROR_PAGE_HINTS = [
 class SEOParser:
     """Простой SEO парсер для анализа заголовков"""
     
-    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None):
+    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False):
         self.delay_between_requests = delay_between_requests
-        self.session = requests.Session()
+        # Инициализируем HTTP-сессию
+        if use_cloudscraper:
+            try:
+                import cloudscraper  # type: ignore
+                self.session = cloudscraper.create_scraper()
+                logger.info("Инициализирован cloudscraper для HTTP-сессии")
+            except Exception as e:
+                logger.warning(f"Не удалось инициализировать cloudscraper, используем requests.Session(): {e}")
+                self.session = requests.Session()
+        else:
+            self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         self.config = config
         self.sheets_manager = sheets_manager
+        self.max_retries = max_retries
+        self.backoff_seconds = backoff_seconds
+        self.ignore_protection = ignore_protection
     
     def analyze_page(self, url: str) -> Dict[str, Any]:
         """
@@ -76,14 +89,12 @@ class SEOParser:
         }
         
         try:
-            max_retries = 2
-            backoff_seconds = 0.7
             last_error = None
 
-            for attempt in range(max_retries + 1):
+            for attempt in range(self.max_retries + 1):
                 try:
                     # Используем requests.get, чтобы удобнее было мокать в тестах
-                    response = requests.get(
+                    response = self.session.get(
                         url,
                         headers=self.session.headers,
                         timeout=30
@@ -94,7 +105,7 @@ class SEOParser:
                         raise requests.exceptions.HTTPError(f"Server error {response.status_code}")
 
                     text_lower = (response.text or '').lower()
-                    if any(hint in text_lower for hint in _PROTECTION_HINTS):
+                    if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
                         raise RuntimeError("Temporary protection or captcha page detected")
 
                     # Парсим HTML
@@ -119,8 +130,8 @@ class SEOParser:
 
                 except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, RuntimeError) as e:
                     last_error = e
-                    if attempt < max_retries:
-                        time.sleep(backoff_seconds * (2 ** attempt))
+                    if attempt < self.max_retries:
+                        time.sleep(self.backoff_seconds * (2 ** attempt))
                         continue
                     else:
                         raise
@@ -399,12 +410,17 @@ class SEOParser:
 
 
 class MultiSiteAnalyzer:
-    def __init__(self, sites_config_file: str = 'sites_config.json'):
+    def __init__(self, sites_config_file: str = 'sites_config.json', delay_between_requests: float = 2.0, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False):
         """
         Инициализация мультисайтового анализатора
         
         Args:
             sites_config_file: Путь к файлу конфигурации сайтов
+            delay_between_requests: Задержка между запросами
+            max_retries: Количество повторных попыток при временных ошибках
+            backoff_seconds: Начальная задержка для экспоненциального бэкоффа
+            ignore_protection: Игнорировать защитные страницы (капча/Cloudflare)
+            use_cloudscraper: Использовать cloudscraper для обхода простых проверок
         """
         self.sites_config_file = sites_config_file
         self.config = self.load_sites_config()
@@ -418,7 +434,15 @@ class MultiSiteAnalyzer:
             logger.warning("Telegram бот не настроен (отсутствуют BOT_TOKEN или CHAT_ID)")
         
         # Создаем парсер с конфигурацией и sheets_manager
-        self.parser = SEOParser(config=self.config, sheets_manager=self.sheets_manager)
+        self.parser = SEOParser(
+            delay_between_requests=delay_between_requests,
+            config=self.config,
+            sheets_manager=self.sheets_manager,
+            max_retries=max_retries,
+            backoff_seconds=backoff_seconds,
+            ignore_protection=ignore_protection,
+            use_cloudscraper=use_cloudscraper
+        )
         
     def load_sites_config(self) -> Dict:
         """Загрузка конфигурации сайтов"""
@@ -776,6 +800,16 @@ def main():
                        help='Не отправлять отчет в Telegram')
     parser.add_argument('--no-log', action='store_true',
                        help='Не записывать логи в файл')
+    parser.add_argument('--delay', type=float, default=2.0,
+                       help='Задержка между запросами, сек (по умолчанию 2.0)')
+    parser.add_argument('--max-retries', type=int, default=2,
+                       help='Число повторов при временных ошибках (по умолчанию 2)')
+    parser.add_argument('--backoff', type=float, default=0.7,
+                       help='Начальная задержка для экспоненциального бэкоффа, сек (по умолчанию 0.7)')
+    parser.add_argument('--ignore-protection', action='store_true',
+                       help='Игнорировать защитные страницы (капча/Cloudflare)')
+    parser.add_argument('--use-cloudscraper', action='store_true',
+                       help='Использовать cloudscraper для обхода простых проверок')
     
     args = parser.parse_args()
     
@@ -800,7 +834,14 @@ def main():
     
     try:
         # Создаем анализатор
-        analyzer = MultiSiteAnalyzer(args.config)
+        analyzer = MultiSiteAnalyzer(
+            sites_config_file=args.config,
+            delay_between_requests=args.delay,
+            max_retries=args.max_retries,
+            backoff_seconds=args.backoff,
+            ignore_protection=args.ignore_protection,
+            use_cloudscraper=args.use_cloudscraper
+        )
         
         # Показываем список сайтов
         if args.list_sites:
