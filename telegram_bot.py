@@ -187,14 +187,8 @@ class TelegramBot:
 <i> 💥 Ссылка на отчет: https://docs.google.com/spreadsheets/d/1NTyI48H4woktkCqnvjGsMOWZbnqs8oCMMNP3j_AJDkw/edit?gid=1041857980#gid=1041857980 </i>"
 <i>🤖 Отправлено автоматически</i>"""
             
-            # Отправляем основное сообщение
-            success = self.send_message(message)
-            
-            # Если есть изменения, отправляем детали отдельным сообщением
-            if changes_count > 0:
-                self.send_detailed_changes(sites_results)
-            
-            return success
+            # Отправляем основное сообщение (детальные изменения отправляет вызывающая сторона)
+            return self.send_message(message)
             
         except Exception as e:
             logger.error(f"Ошибка формирования статистики для Telegram: {e}")
