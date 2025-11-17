@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 from google_sheets_service_account import GoogleSheetsServiceAccount
 from telegram_bot import TelegramBot
@@ -47,7 +48,7 @@ _ERROR_PAGE_HINTS = [
 class SEOParser:
     """Простой SEO парсер для анализа заголовков"""
     
-    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False, request_timeout: float = 60.0):
+    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False, request_timeout: float = 60.0, follow_meta_refresh: bool = True, max_meta_refresh_hops: int = 2):
         self.delay_between_requests = delay_between_requests
         # Инициализируем HTTP-сессию
         if use_cloudscraper:
@@ -69,6 +70,40 @@ class SEOParser:
         self.backoff_seconds = backoff_seconds
         self.ignore_protection = ignore_protection
         self.request_timeout = float(request_timeout)
+        self.follow_meta_refresh = bool(follow_meta_refresh)
+        self.max_meta_refresh_hops = int(max_meta_refresh_hops)
+
+    def _extract_meta_refresh_target(self, soup: BeautifulSoup) -> str:
+        """
+        Извлекает URL из meta http-equiv=\"refresh\" если он указан.
+        Возвращает пустую строку, если URL не найден.
+        """
+        if not soup:
+            return ''
+        metas = soup.find_all('meta')
+        for meta in metas:
+            http_equiv = (meta.get('http-equiv') or meta.get('http_equiv') or '')
+            if str(http_equiv).lower().strip() == 'refresh':
+                content = (meta.get('content') or '')
+                if not content:
+                    continue
+                # content обычно вида: "0; url=/path" или "5;URL='https://example.com'"
+                parts = [p.strip() for p in str(content).split(';') if p is not None]
+                # ищем часть с url=
+                for part in parts:
+                    lower = part.lower()
+                    if 'url=' in lower:
+                        # берём все после первого '='
+                        try:
+                            url_part = part.split('=', 1)[1].strip().strip('\'"')
+                            return url_part
+                        except Exception:
+                            continue
+                # если точной части не нашли, но content начинается с url=
+                lower_content = str(content).lower().strip()
+                if lower_content.startswith('url='):
+                    return str(content).split('=', 1)[1].strip().strip('\'"')
+        return ''
     
     def analyze_page(self, url: str) -> Dict[str, Any]:
         """
@@ -110,36 +145,68 @@ class SEOParser:
                     if 500 <= response.status_code < 600:
                         raise requests.exceptions.HTTPError(f"Server error {response.status_code}")
 
-                    # Обработка редиректов: фиксируем финальный URL и цепочку переходов
-                    final_url = getattr(response, 'url', original_url)
-                    redirect_chain = []
+                    # Базовая обработка: собираем цепочку HTTP-редиректов и поддерживаем meta-refresh
+                    redirect_chain: List[Dict[str, Any]] = []
+                    # Добавляем HTTP-редиректы текущего ответа
                     for hop in getattr(response, 'history', []) or []:
-                        # В history .url — это URL после этого запроса; Location может отсутствовать
                         hop_url = getattr(hop, 'headers', {}).get('Location') or getattr(hop, 'url', '')
-                        redirect_chain.append({
-                            'status_code': hop.status_code,
-                            'url': hop_url
-                        })
-                    redirected = (bool(getattr(response, 'history', [])) or final_url != original_url)
+                        redirect_chain.append({'status_code': hop.status_code, 'url': hop_url})
+                    final_response = response
+                    final_url = getattr(final_response, 'url', original_url)
 
-                    # Сохраняем информацию о редиректе, но исходный URL оставляем в result['url']
+                    # Проверка защитных страниц на текущем ответе
+                    text_lower = (final_response.text or '').lower()
+                    if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
+                        raise RuntimeError("Temporary protection or captcha page detected")
+
+                    # Поддержка meta refresh (до max_meta_refresh_hops)
+                    visited_urls = set([final_url])
+                    meta_hops = 0
+                    while self.follow_meta_refresh and meta_hops < self.max_meta_refresh_hops:
+                        soup_probe = BeautifulSoup(final_response.content, 'html.parser')
+                        meta_target = self._extract_meta_refresh_target(soup_probe)
+                        if not meta_target:
+                            break
+                        next_url = urljoin(final_url, meta_target)
+                        if not next_url or next_url in visited_urls:
+                            break
+                        # Запоминаем meta-hop
+                        redirect_chain.append({'type': 'meta-refresh', 'url': next_url})
+                        # Переходим по meta refresh
+                        final_response = self.session.get(
+                            next_url,
+                            headers=self.session.headers,
+                            timeout=self.request_timeout
+                        )
+                        if 500 <= final_response.status_code < 600:
+                            raise requests.exceptions.HTTPError(f"Server error {final_response.status_code}")
+                        # Добавляем HTTP-редиректы для этого шага (если есть)
+                        for hop in getattr(final_response, 'history', []) or []:
+                            hop_url = getattr(hop, 'headers', {}).get('Location') or getattr(hop, 'url', '')
+                            redirect_chain.append({'status_code': hop.status_code, 'url': hop_url})
+                        final_url = getattr(final_response, 'url', next_url)
+                        visited_urls.add(final_url)
+                        meta_hops += 1
+                        # Проверка защитных страниц после перехода
+                        text_lower = (final_response.text or '').lower()
+                        if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
+                            raise RuntimeError("Temporary protection or captcha page detected")
+
+                    redirected = (bool(redirect_chain) or final_url != original_url)
+                    # Сохраняем информацию о редиректе
                     result['redirected'] = redirected
                     result['final_url'] = final_url
                     result['redirect_chain'] = redirect_chain
 
-                    text_lower = (response.text or '').lower()
-                    if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
-                        raise RuntimeError("Temporary protection or captcha page detected")
-
-                    # Парсим HTML
-                    soup = BeautifulSoup(response.content, 'html.parser')
+                    # Парсим HTML конечного ответа
+                    soup = BeautifulSoup(final_response.content, 'html.parser')
 
                     # Анализируем заголовки
                     headings = self._analyze_headings(soup)
 
                     result.update({
                         'status': 'success',
-                        'status_code': response.status_code,
+                        'status_code': final_response.status_code,
                         'headings': headings,
                         # Сравнение ведем по исходному URL (как в финальной таблице)
                         'comparison': self._compare_with_previous(original_url, headings)
@@ -617,7 +684,9 @@ class MultiSiteAnalyzer:
                             # Печатаем только первые 3 шага, чтобы не засорять вывод
                             shown = chain[:3]
                             for step_idx, step in enumerate(shown, 1):
-                                print(f"        {step_idx}) {step.get('status_code', '')} -> {step.get('url', '')}")
+                                step_type = step.get('type')
+                                label = f"[{step_type}] " if step_type else ""
+                                print(f"        {step_idx}) {label}{step.get('status_code', '')} -> {step.get('url', '')}")
                             if len(chain) > 3:
                                 print(f"        ... ещё {len(chain) - 3} шаг(а)")
                     
