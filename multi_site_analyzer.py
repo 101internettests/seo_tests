@@ -105,6 +105,29 @@ class SEOParser:
                     return str(content).split('=', 1)[1].strip().strip('\'"')
         return ''
     
+    def _get_effective_overrides(self, url: str) -> Dict[str, Any]:
+        """
+        Возвращает эффективные настройки для конкретного URL:
+        - request_timeout
+        - max_meta_refresh_hops
+        По умолчанию — значения инстанса. Для отдельных URL может быть выше таймаут/хопы.
+        """
+        # Базовые значения по умолчанию
+        effective = {
+            'request_timeout': self.request_timeout,
+            'max_meta_refresh_hops': self.max_meta_refresh_hops
+        }
+        # Специальные URL из ТЗ: поднимаем таймаут и число meta-refresh хопов
+        special_prefixes = [
+            'https://101internet.ru/moskva/domashniy-internet/podklyuchit-provodnoj-internet',
+            'https://101internet.ru/moskva/domashniy-internet/podklyuchit-internet-tv',
+            'https://101internet.ru/tomsk/rates/skorostnoj-internet',
+        ]
+        if any(url.startswith(prefix) for prefix in special_prefixes):
+            effective['request_timeout'] = max(self.request_timeout, 180.0)  # минимум 180 сек
+            effective['max_meta_refresh_hops'] = max(self.max_meta_refresh_hops, 3)
+        return effective
+    
     def analyze_page(self, url: str) -> Dict[str, Any]:
         """
         Анализ одной страницы
@@ -134,11 +157,15 @@ class SEOParser:
 
             for attempt in range(self.max_retries + 1):
                 try:
+                    # Получаем эффективные настройки для данного URL
+                    overrides = self._get_effective_overrides(original_url)
+                    effective_timeout = float(overrides['request_timeout'])
+                    effective_meta_hops = int(overrides['max_meta_refresh_hops'])
                     # Используем requests.get, чтобы удобнее было мокать в тестах
                     response = self.session.get(
                         url,
                         headers=self.session.headers,
-                        timeout=self.request_timeout
+                        timeout=effective_timeout
                     )
 
                     # Повторяем при временных серверных ошибках
@@ -162,7 +189,7 @@ class SEOParser:
                     # Поддержка meta refresh (до max_meta_refresh_hops)
                     visited_urls = set([final_url])
                     meta_hops = 0
-                    while self.follow_meta_refresh and meta_hops < self.max_meta_refresh_hops:
+                    while self.follow_meta_refresh and meta_hops < effective_meta_hops:
                         soup_probe = BeautifulSoup(final_response.content, 'html.parser')
                         meta_target = self._extract_meta_refresh_target(soup_probe)
                         if not meta_target:
@@ -176,7 +203,7 @@ class SEOParser:
                         final_response = self.session.get(
                             next_url,
                             headers=self.session.headers,
-                            timeout=self.request_timeout
+                            timeout=effective_timeout
                         )
                         if 500 <= final_response.status_code < 600:
                             raise requests.exceptions.HTTPError(f"Server error {final_response.status_code}")

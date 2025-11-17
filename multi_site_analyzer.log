@@ -32627,3 +32627,21 @@
 2025-11-10 07:20:03,178 - INFO - Основная статистика отправлена в Telegram
 2025-11-10 07:20:03,837 - INFO - Сообщение успешно отправлено в Telegram
 2025-11-10 07:20:03,838 - INFO - Детальные изменения отправлены в Telegram
+2025-11-17 21:47:39,376 - INFO - Конфигурация сайтов загружена из sites_config.json
+2025-11-17 21:47:39,380 - INFO - file_cache is only supported with oauth2client<4.0.0
+2025-11-17 21:47:39,395 - INFO - Google Sheets API инициализирован успешно
+2025-11-17 21:47:39,395 - INFO - Telegram бот инициализирован
+2025-11-17 21:47:39,395 - INFO - Анализируем пользовательские URL: 1
+2025-11-17 21:47:44,689 - INFO - Получено 24615 строк из таблицы
+2025-11-17 21:47:44,690 - INFO - Предыдущих данных для https://101internet.ru/moskva/domashniy-internet/podklyuchit-provodnoj-internet не найдено - это первая проверка
+2025-11-17 21:47:46,694 - INFO - Проанализирована страница: https://101internet.ru/moskva/domashniy-internet/podklyuchit-provodnoj-internet
+2025-11-17 21:47:46,697 - INFO - Результаты сохранены в multi_site_results_20251117_214746.json
+2025-11-17 21:47:53,478 - INFO - Конфигурация сайтов загружена из sites_config.json
+2025-11-17 21:47:53,481 - INFO - file_cache is only supported with oauth2client<4.0.0
+2025-11-17 21:47:53,483 - INFO - Google Sheets API инициализирован успешно
+2025-11-17 21:47:53,483 - INFO - Telegram бот инициализирован
+2025-11-17 21:47:53,484 - INFO - Анализируем пользовательские URL: 1
+2025-11-17 21:47:57,238 - INFO - Получено 24615 строк из таблицы
+2025-11-17 21:47:57,240 - INFO - Предыдущих данных для https://101internet.ru/moskva/domashniy-internet/podklyuchit-provodnoj-internet не найдено - это первая проверка
+2025-11-17 21:47:59,243 - INFO - Проанализирована страница: https://101internet.ru/moskva/domashniy-internet/podklyuchit-provodnoj-internet
+2025-11-17 21:47:59,245 - INFO - Результаты сохранены в multi_site_results_20251117_214759.json
