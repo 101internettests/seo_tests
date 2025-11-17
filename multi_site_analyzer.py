@@ -47,7 +47,7 @@ _ERROR_PAGE_HINTS = [
 class SEOParser:
     """Простой SEO парсер для анализа заголовков"""
     
-    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False):
+    def __init__(self, delay_between_requests: float = 2.0, config: Dict[str, Any] = None, sheets_manager=None, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False, request_timeout: float = 60.0):
         self.delay_between_requests = delay_between_requests
         # Инициализируем HTTP-сессию
         if use_cloudscraper:
@@ -68,6 +68,7 @@ class SEOParser:
         self.max_retries = max_retries
         self.backoff_seconds = backoff_seconds
         self.ignore_protection = ignore_protection
+        self.request_timeout = float(request_timeout)
     
     def analyze_page(self, url: str) -> Dict[str, Any]:
         """
@@ -79,13 +80,18 @@ class SEOParser:
         Returns:
             Результат анализа
         """
+        original_url = url
         result = {
             'url': url,
             'timestamp': datetime.now().isoformat(),
             'status': 'error',
             'error': None,
             'headings': {},
-            'comparison': {}
+            'comparison': {},
+            # Поля редиректов по умолчанию
+            'redirected': False,
+            'final_url': None,
+            'redirect_chain': []
         }
         
         try:
@@ -97,12 +103,29 @@ class SEOParser:
                     response = self.session.get(
                         url,
                         headers=self.session.headers,
-                        timeout=30
+                        timeout=self.request_timeout
                     )
 
                     # Повторяем при временных серверных ошибках
                     if 500 <= response.status_code < 600:
                         raise requests.exceptions.HTTPError(f"Server error {response.status_code}")
+
+                    # Обработка редиректов: фиксируем финальный URL и цепочку переходов
+                    final_url = getattr(response, 'url', original_url)
+                    redirect_chain = []
+                    for hop in getattr(response, 'history', []) or []:
+                        # В history .url — это URL после этого запроса; Location может отсутствовать
+                        hop_url = getattr(hop, 'headers', {}).get('Location') or getattr(hop, 'url', '')
+                        redirect_chain.append({
+                            'status_code': hop.status_code,
+                            'url': hop_url
+                        })
+                    redirected = (bool(getattr(response, 'history', [])) or final_url != original_url)
+
+                    # Сохраняем информацию о редиректе, но исходный URL оставляем в result['url']
+                    result['redirected'] = redirected
+                    result['final_url'] = final_url
+                    result['redirect_chain'] = redirect_chain
 
                     text_lower = (response.text or '').lower()
                     if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
@@ -118,7 +141,8 @@ class SEOParser:
                         'status': 'success',
                         'status_code': response.status_code,
                         'headings': headings,
-                        'comparison': self._compare_with_previous(url, headings)
+                        # Сравнение ведем по исходному URL (как в финальной таблице)
+                        'comparison': self._compare_with_previous(original_url, headings)
                     })
 
                     # Задержка между запросами после успешного запроса
@@ -410,7 +434,7 @@ class SEOParser:
 
 
 class MultiSiteAnalyzer:
-    def __init__(self, sites_config_file: str = 'sites_config.json', delay_between_requests: float = 2.0, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False):
+    def __init__(self, sites_config_file: str = 'sites_config.json', delay_between_requests: float = 2.0, max_retries: int = 2, backoff_seconds: float = 0.7, ignore_protection: bool = False, use_cloudscraper: bool = False, request_timeout: float = 60.0):
         """
         Инициализация мультисайтового анализатора
         
@@ -421,6 +445,7 @@ class MultiSiteAnalyzer:
             backoff_seconds: Начальная задержка для экспоненциального бэкоффа
             ignore_protection: Игнорировать защитные страницы (капча/Cloudflare)
             use_cloudscraper: Использовать cloudscraper для обхода простых проверок
+            request_timeout: Таймаут HTTP-запроса в секундах
         """
         self.sites_config_file = sites_config_file
         self.config = self.load_sites_config()
@@ -441,7 +466,8 @@ class MultiSiteAnalyzer:
             max_retries=max_retries,
             backoff_seconds=backoff_seconds,
             ignore_protection=ignore_protection,
-            use_cloudscraper=use_cloudscraper
+            use_cloudscraper=use_cloudscraper,
+            request_timeout=request_timeout
         )
         
     def load_sites_config(self) -> Dict:
@@ -580,6 +606,20 @@ class MultiSiteAnalyzer:
                 if result['status'] == 'success':
                     site_successful += 1
                     successful_pages += 1
+                    
+                    # Показать информацию о редиректе (для визуального контроля)
+                    if result.get('redirected'):
+                        print(f"      ↪️ Редирект: да")
+                        if result.get('final_url'):
+                            print(f"      Итоговый URL: {result['final_url']}")
+                        chain = result.get('redirect_chain') or []
+                        if chain:
+                            # Печатаем только первые 3 шага, чтобы не засорять вывод
+                            shown = chain[:3]
+                            for step_idx, step in enumerate(shown, 1):
+                                print(f"        {step_idx}) {step.get('status_code', '')} -> {step.get('url', '')}")
+                            if len(chain) > 3:
+                                print(f"        ... ещё {len(chain) - 3} шаг(а)")
                     
                     headings = result['headings']
                     print("      📈 Количество заголовков:")
@@ -810,6 +850,8 @@ def main():
                        help='Игнорировать защитные страницы (капча/Cloudflare)')
     parser.add_argument('--use-cloudscraper', action='store_true',
                        help='Использовать cloudscraper для обхода простых проверок')
+    parser.add_argument('--timeout', type=float, default=60.0,
+                       help='Таймаут HTTP-запроса, сек (по умолчанию 60.0)')
     
     args = parser.parse_args()
     
@@ -840,7 +882,8 @@ def main():
             max_retries=args.max_retries,
             backoff_seconds=args.backoff,
             ignore_protection=args.ignore_protection,
-            use_cloudscraper=args.use_cloudscraper
+            use_cloudscraper=args.use_cloudscraper,
+            request_timeout=args.timeout
         )
         
         # Показываем список сайтов
