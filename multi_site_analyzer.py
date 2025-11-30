@@ -73,6 +73,43 @@ class SEOParser:
         self.follow_meta_refresh = bool(follow_meta_refresh)
         self.max_meta_refresh_hops = int(max_meta_refresh_hops)
 
+    def _parse_meta_refresh(self, soup: BeautifulSoup) -> (str, int):
+        """
+        Возвращает (target_url, delay_seconds) из meta http-equiv="refresh".
+        Если не найдено, возвращает ('', 0).
+        """
+        if not soup:
+            return '', 0
+        metas = soup.find_all('meta')
+        for meta in metas:
+            http_equiv = (meta.get('http-equiv') or meta.get('http_equiv') or '')
+            if str(http_equiv).lower().strip() == 'refresh':
+                content = (meta.get('content') or '')
+                if not content:
+                    continue
+                # content вида: "5; url=/path" или "0;URL='https://example.com'"
+                parts = [p.strip() for p in str(content).split(';') if p is not None]
+                delay = 0
+                target = ''
+                for part in parts:
+                    lower = part.lower()
+                    if lower.startswith('url='):
+                        try:
+                            target = part.split('=', 1)[1].strip().strip('\'"')
+                        except Exception:
+                            target = ''
+                    else:
+                        # Возможная задержка (секунды) до точки/точки с запятой
+                        try:
+                            # Берем ведущие цифры
+                            delay_candidate = ''.join(ch for ch in part if ch.isdigit())
+                            if delay_candidate:
+                                delay = int(delay_candidate)
+                        except Exception:
+                            delay = 0
+                return target, delay
+        return '', 0
+
     def _extract_meta_refresh_target(self, soup: BeautifulSoup) -> str:
         """
         Извлекает URL из meta http-equiv=\"refresh\" если он указан.
@@ -186,12 +223,12 @@ class SEOParser:
                     if (not self.ignore_protection) and any(hint in text_lower for hint in _PROTECTION_HINTS):
                         raise RuntimeError("Temporary protection or captcha page detected")
 
-                    # Поддержка meta refresh (до max_meta_refresh_hops)
+                    # Поддержка meta refresh (до max_meta_refresh_hопs) с учетом задержки
                     visited_urls = set([final_url])
                     meta_hops = 0
                     while self.follow_meta_refresh and meta_hops < effective_meta_hops:
                         soup_probe = BeautifulSoup(final_response.content, 'html.parser')
-                        meta_target = self._extract_meta_refresh_target(soup_probe)
+                        meta_target, meta_delay = self._parse_meta_refresh(soup_probe)
                         if not meta_target:
                             break
                         next_url = urljoin(final_url, meta_target)
@@ -199,6 +236,9 @@ class SEOParser:
                             break
                         # Запоминаем meta-hop
                         redirect_chain.append({'type': 'meta-refresh', 'url': next_url})
+                        # Если указана задержка — подождем разумно (не более 10 сек)
+                        if meta_delay and meta_delay > 0:
+                            time.sleep(min(meta_delay, 10))
                         # Переходим по meta refresh
                         final_response = self.session.get(
                             next_url,
@@ -220,6 +260,23 @@ class SEOParser:
                             raise RuntimeError("Temporary protection or captcha page detected")
 
                     redirected = (bool(redirect_chain) or final_url != original_url)
+                    # Если был редирект — подождем немного и повторно откроем финальный URL
+                    if redirected:
+                        time.sleep(0.5)
+                        follow_up_response = self.session.get(
+                            final_url,
+                            headers=self.session.headers,
+                            timeout=effective_timeout
+                        )
+                        if 500 <= follow_up_response.status_code < 600:
+                            raise requests.exceptions.HTTPError(f"Server error {follow_up_response.status_code}")
+                        # Если при повторном открытии были ещё HTTP-редиректы — добавим в цепочку
+                        for hop in getattr(follow_up_response, 'history', []) or []:
+                            hop_url = getattr(hop, 'headers', {}).get('Location') or getattr(hop, 'url', '')
+                            redirect_chain.append({'status_code': hop.status_code, 'url': hop_url})
+                        final_response = follow_up_response
+                        final_url = getattr(final_response, 'url', final_url)
+
                     # Сохраняем информацию о редиректе
                     result['redirected'] = redirected
                     result['final_url'] = final_url
