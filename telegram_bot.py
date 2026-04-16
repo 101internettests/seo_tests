@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+import html
 from typing import Dict, Any
 from datetime import datetime
 import time
@@ -27,14 +28,57 @@ class TelegramBot:
         """
         self.bot_token = bot_token or os.getenv('BOT_TOKEN')
         self.chat_id = chat_id or os.getenv('CHAT_ID')
+        self.use_telegram_proxy = self._env_bool('USE_TELEGRAM_PROXY', False)
+        self.telegram_proxy_url = (os.getenv('TELEGRAM_PROXY_URL') or '').strip()
+        self.telegram_proxy_auth_secret = (os.getenv('TELEGRAM_PROXY_AUTH_SECRET') or '').strip()
+        self.telegram_proxy_creds = (os.getenv('TELEGRAM_PROXY_CREDS') or '').strip()
+        try:
+            self.telegram_proxy_timeout_sec = float(os.getenv('TELEGRAM_PROXY_TIMEOUT_SEC', '15'))
+        except Exception:
+            self.telegram_proxy_timeout_sec = 15.0
+
         # Временная защита от дублей ошибок (по сообщению, в пределах окна времени)
         self._last_error_fingerprint = None
         self._last_error_ts = 0.0
-        
-        if not self.bot_token:
-            logger.warning("BOT_TOKEN не найден в переменных окружения")
-        if not self.chat_id:
-            logger.warning("CHAT_ID не найден в переменных окружения")
+        self._proxy_missing_env_logged = False
+
+        if self.use_telegram_proxy:
+            missing_proxy_env = self._missing_proxy_env()
+            if missing_proxy_env:
+                logger.warning(
+                    "USE_TELEGRAM_PROXY=true, но отсутствуют обязательные env: %s",
+                    ', '.join(missing_proxy_env),
+                )
+            else:
+                logger.info("Telegram proxy режим включен")
+        else:
+            if not self.bot_token:
+                logger.warning("BOT_TOKEN не найден в переменных окружения")
+            if not self.chat_id:
+                logger.warning("CHAT_ID не найден в переменных окружения")
+
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return raw_value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+    def _missing_proxy_env(self):
+        missing = []
+        if not self.telegram_proxy_url:
+            missing.append('TELEGRAM_PROXY_URL')
+        if not self.telegram_proxy_auth_secret:
+            missing.append('TELEGRAM_PROXY_AUTH_SECRET')
+        if not self.telegram_proxy_creds:
+            missing.append('TELEGRAM_PROXY_CREDS')
+        return missing
+
+    def is_configured(self) -> bool:
+        """Проверка готовности транспорта уведомлений."""
+        if self.use_telegram_proxy:
+            return len(self._missing_proxy_env()) == 0
+        return bool(self.bot_token and self.chat_id)
     
     def send_message(self, message: str) -> bool:
         """
@@ -46,34 +90,84 @@ class TelegramBot:
         Returns:
             True если сообщение отправлено успешно, False в противном случае
         """
-        if not self.bot_token or not self.chat_id:
-            logger.error("BOT_TOKEN или CHAT_ID не настроены")
-            return False
-        
         try:
+            if self.use_telegram_proxy:
+                missing_proxy_env = self._missing_proxy_env()
+                if missing_proxy_env:
+                    if not self._proxy_missing_env_logged:
+                        logger.error(
+                            "Telegram proxy missing required env vars: %s",
+                            ', '.join(missing_proxy_env),
+                        )
+                        self._proxy_missing_env_logged = True
+                    return False
+
+                response = requests.post(
+                    self.telegram_proxy_url,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'X-Authentication': self.telegram_proxy_auth_secret,
+                    },
+                    json={
+                        'title': html.escape('SEO analyzer alert'),
+                        'text': html.escape(message),
+                        'creds': self.telegram_proxy_creds,
+                        'parse_mode': 'HTML',
+                        'disable_notification': False,
+                    },
+                    timeout=self.telegram_proxy_timeout_sec,
+                )
+
+                if response.status_code >= 400:
+                    logger.error(
+                        "Telegram proxy error: status=%s body=%s",
+                        response.status_code,
+                        (response.text or '')[:180],
+                    )
+                    return False
+
+                logger.info("Сообщение успешно отправлено в Telegram через proxy")
+                return True
+
+            if not self.bot_token or not self.chat_id:
+                logger.error("BOT_TOKEN или CHAT_ID не настроены")
+                return False
+
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             data = {
                 'chat_id': self.chat_id,
                 'text': message,
                 'parse_mode': 'HTML'  # Поддержка HTML разметки
             }
-            
+
             response = requests.post(url, data=data, timeout=10)
             response.raise_for_status()
-            
+
             result = response.json()
             if result.get('ok'):
                 logger.info("Сообщение успешно отправлено в Telegram")
                 return True
-            else:
-                logger.error(f"Ошибка отправки в Telegram: {result.get('description', 'Неизвестная ошибка')}")
-                return False
+
+            logger.error(f"Ошибка отправки в Telegram: {result.get('description', 'Неизвестная ошибка')}")
+            return False
                 
+        except requests.exceptions.Timeout:
+            if self.use_telegram_proxy:
+                logger.error("Telegram proxy timeout after %ss", self.telegram_proxy_timeout_sec)
+            else:
+                logger.error("Таймаут сети при отправке в Telegram")
+            return False
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка сети при отправке в Telegram: {e}")
+            if self.use_telegram_proxy:
+                logger.error(f"Telegram proxy transport error: {e}")
+            else:
+                logger.error(f"Ошибка сети при отправке в Telegram: {e}")
             return False
         except Exception as e:
-            logger.error(f"Ошибка отправки в Telegram: {e}")
+            if self.use_telegram_proxy:
+                logger.error(f"Telegram proxy unexpected error: {e}")
+            else:
+                logger.error(f"Ошибка отправки в Telegram: {e}")
             return False
 
     def send_statistics(self, sites_results: Dict[str, Any]) -> bool:

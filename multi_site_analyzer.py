@@ -604,10 +604,16 @@ class MultiSiteAnalyzer:
         
         # Инициализируем Telegram бота
         self.telegram_bot = TelegramBot()
-        if self.telegram_bot.bot_token and self.telegram_bot.chat_id:
-            logger.info("Telegram бот инициализирован")
+        if self.telegram_bot.is_configured():
+            if self.telegram_bot.use_telegram_proxy:
+                logger.info("Telegram бот инициализирован (proxy transport)")
+            else:
+                logger.info("Telegram бот инициализирован (direct transport)")
         else:
-            logger.warning("Telegram бот не настроен (отсутствуют BOT_TOKEN или CHAT_ID)")
+            if self.telegram_bot.use_telegram_proxy:
+                logger.warning("Telegram proxy не настроен (отсутствуют TELEGRAM_PROXY_* env)")
+            else:
+                logger.warning("Telegram бот не настроен (отсутствуют BOT_TOKEN или CHAT_ID)")
         
         # Создаем парсер с конфигурацией и sheets_manager
         self.parser = SEOParser(
@@ -878,7 +884,7 @@ class MultiSiteAnalyzer:
     def send_telegram_report(self, sites_results: Dict[str, List[Dict]]):
         """Отправка отчета в Telegram"""
         try:
-            if not self.telegram_bot.bot_token or not self.telegram_bot.chat_id:
+            if not self.telegram_bot.is_configured():
                 logger.warning("Telegram бот не настроен, пропускаем отправку отчета")
                 return
 
@@ -906,7 +912,7 @@ class MultiSiteAnalyzer:
     def send_telegram_error(self, error_message: str):
         """Отправка уведомления об ошибке в Telegram"""
         try:
-            if not self.telegram_bot.bot_token or not self.telegram_bot.chat_id:
+            if not self.telegram_bot.is_configured():
                 return
             
             self.telegram_bot.send_error_notification(error_message)

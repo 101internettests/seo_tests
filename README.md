@@ -67,6 +67,23 @@ pip install -r requirements.txt
 
 ## Конфигурация
 
+## Telegram уведомления (proxy/direct)
+
+Поддерживаются два транспорта уведомлений:
+
+- `direct` (обратная совместимость): `BOT_TOKEN` + `CHAT_ID`
+- `proxy` (рекомендуется): `USE_TELEGRAM_PROXY=true` и `TELEGRAM_PROXY_*`
+
+Proxy-контракт:
+
+- `USE_TELEGRAM_PROXY=true`
+- `TELEGRAM_PROXY_URL`
+- `TELEGRAM_PROXY_AUTH_SECRET`
+- `TELEGRAM_PROXY_CREDS`
+- `TELEGRAM_PROXY_TIMEOUT_SEC=15` (опционально)
+
+Важно: при `USE_TELEGRAM_PROXY=true` отправка идет только через proxy-credentials (это позволяет отправлять в другой Telegram-чат без изменения `CHAT_ID`).
+
 ### Создание файла конфигурации
 
 ```bash
