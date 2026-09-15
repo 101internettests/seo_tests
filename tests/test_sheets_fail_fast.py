@@ -1,5 +1,6 @@
 """The CLI must fail before crawling when its Google Sheets dependency fails."""
 import json
+import logging
 import sys
 from unittest.mock import Mock
 
@@ -51,7 +52,8 @@ def setup_run(monkeypatch, tmp_path):
 @pytest.mark.parametrize('error', [google_error(400), google_error(401), google_error(403),
                                  google_error(404), google_error(429), google_error(503),
                                  TimeoutError('connection timed out')])
-def test_preflight_failure_exits_and_alerts_before_crawling(setup_run, error, capsys):
+def test_preflight_failure_exits_and_alerts_before_crawling(setup_run, error, capsys, caplog):
+    caplog.set_level(logging.INFO)
     values, factory, bot, crawl, save = setup_run
     values.get.return_value.execute.side_effect = error
     with pytest.raises(SystemExit) as stopped:
@@ -67,9 +69,23 @@ def test_preflight_failure_exits_and_alerts_before_crawling(setup_run, error, ca
     assert 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit' in message
     assert '<denied>' not in message
     assert 'Анализ завершен успешно' not in capsys.readouterr().out
+    assert 'Этап: Проверка чтения таблицы до обхода URL' in caplog.text
+    assert 'URL начато: 0; обработано: 0' in caplog.text
+    assert 'обход URL не начат' in caplog.text
+    assert 'Лист: SEO report' in caplog.text
+    assert 'Таблица: https://docs.google.com/spreadsheets/d/test-sheet-id/edit' in caplog.text
+    assert 'Причина и что проверить:' in caplog.text
+    assert 'Telegram-алерт об ошибке успешно отправлен' in caplog.text
+    assert 'Завершение процесса с кодом 1' in caplog.text
+    if isinstance(error, HttpError):
+        assert f'HTTP-статус: {error.resp.status}' in caplog.text
+        assert 'Подробности ошибки: Access <denied> & unavailable' in caplog.text
+    else:
+        assert 'Тип ошибки: TimeoutError' in caplog.text
+        assert 'HTTP-статус: не указан в исключении' in caplog.text
 
 
-def test_initialization_failure_still_sends_alert(setup_run):
+def test_initialization_failure_still_sends_alert(setup_run, caplog):
     values, factory, bot, crawl, save = setup_run
     factory.side_effect = ValueError('Invalid service account configuration')
     with pytest.raises(SystemExit) as stopped:
@@ -78,10 +94,12 @@ def test_initialization_failure_still_sends_alert(setup_run):
     crawl.assert_not_called()
     bot.send_message.assert_called_once()
     assert 'Не удалось подключиться' in bot.send_message.call_args.args[0]
+    assert 'Этап: Подключение к Google Sheets' in caplog.text
+    assert 'Тип ошибки: ValueError' in caplog.text
 
 
 @pytest.mark.parametrize('delivery', [False, RuntimeError('Telegram unavailable')])
-def test_alert_delivery_failure_does_not_mask_failed_run(setup_run, delivery):
+def test_alert_delivery_failure_does_not_mask_failed_run(setup_run, delivery, caplog):
     values, factory, bot, crawl, save = setup_run
     values.get.return_value.execute.side_effect = google_error(403)
     if isinstance(delivery, Exception):
@@ -93,6 +111,9 @@ def test_alert_delivery_failure_does_not_mask_failed_run(setup_run, delivery):
     assert stopped.value.code == 1
     crawl.assert_not_called()
     bot.send_message.assert_called_once()
+    assert 'Telegram-алерт об ошибке успешно отправлен' not in caplog.text
+    assert ('Не удалось доставить Telegram-алерт' in caplog.text
+            or 'Ошибка отправки уведомления' in caplog.text)
 
 
 def page_response():
@@ -117,7 +138,7 @@ def test_empty_accessible_sheet_allows_normal_run(setup_run, capsys):
                for call in bot.send_message.call_args_list)
 
 
-def test_access_lost_during_comparison_stops_remaining_urls(setup_run):
+def test_access_lost_during_comparison_stops_remaining_urls(setup_run, caplog):
     values, factory, bot, crawl, save = setup_run
     values.get.return_value.execute.side_effect = [{}, google_error(403)]
     crawl.side_effect = None
@@ -129,9 +150,12 @@ def test_access_lost_during_comparison_stops_remaining_urls(setup_run):
     save.assert_not_called()
     values.append.assert_not_called()
     bot.send_message.assert_called_once()
+    assert 'Этап: Анализ URL и сравнение с Google Sheets' in caplog.text
+    assert 'URL начато: 1; обработано: 0' in caplog.text
+    assert 'Последний начатый URL: https://example.test/one' in caplog.text
 
 
-def test_write_access_failure_exits_without_success_report(setup_run, capsys):
+def test_write_access_failure_exits_without_success_report(setup_run, capsys, caplog):
     values, factory, bot, crawl, save = setup_run
     crawl.side_effect = None
     crawl.return_value = page_response()
@@ -142,9 +166,11 @@ def test_write_access_failure_exits_without_success_report(setup_run, capsys):
     bot.send_message.assert_called_once()
     assert 'Ошибка записи' in bot.send_message.call_args.args[0]
     assert 'Анализ завершен успешно' not in capsys.readouterr().out
+    assert 'Этап: Запись результатов в Google Sheets' in caplog.text
+    assert 'URL начато: 2; обработано: 2' in caplog.text
 
 
-def test_no_telegram_flag_suppresses_alert_but_still_fails(setup_run, monkeypatch):
+def test_no_telegram_flag_suppresses_alert_but_still_fails(setup_run, monkeypatch, caplog):
     values, factory, bot, crawl, save = setup_run
     monkeypatch.setattr(sys, 'argv', sys.argv + ['--no-telegram'])
     values.get.return_value.execute.side_effect = google_error(403)
@@ -153,6 +179,7 @@ def test_no_telegram_flag_suppresses_alert_but_still_fails(setup_run, monkeypatc
     assert stopped.value.code == 1
     bot.send_message.assert_not_called()
     crawl.assert_not_called()
+    assert 'Telegram-алерт не отправлен: указан --no-telegram' in caplog.text
 
 
 def test_list_sites_does_not_require_google(setup_run, monkeypatch):

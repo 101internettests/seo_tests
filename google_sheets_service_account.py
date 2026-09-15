@@ -35,6 +35,11 @@ class GoogleSheetsAccessError(Exception):
         }
         reason = reasons.get(status, 'Не удалось выполнить запрос к Google Sheets. Проверьте соединение и настройки интеграции.')
         detail = error._get_reason() if isinstance(error, HttpError) else str(error)
+        self.operation = operation
+        self.http_status = status
+        self.reason = reason
+        self.detail = detail[:600]
+        self.error_type = type(error).__name__
         code = f' (HTTP {status})' if status else ''
         super().__init__(f'{operation}{code}. {reason}\nПодробности: {detail[:600]}')
 
