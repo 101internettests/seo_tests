@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 
+class GoogleSheetsAccessError(Exception):
+    """Ошибка обязательной интеграции с Google Sheets: прогон нужно остановить."""
+
+    def __init__(self, operation: str, error: Exception):
+        status = getattr(getattr(error, 'resp', None), 'status', None)
+        reasons = {
+            400: 'Неверный ID таблицы, название листа или диапазон.',
+            401: 'Google не принял учетные данные сервисного аккаунта.',
+            403: 'Google запретил доступ. Проверьте права сервисного аккаунта и доступность файла у владельца.',
+            404: 'Таблица не найдена или недоступна сервисному аккаунту.',
+            429: 'Превышен лимит запросов к Google Sheets.',
+        }
+        reason = reasons.get(status, 'Не удалось выполнить запрос к Google Sheets. Проверьте соединение и настройки интеграции.')
+        detail = error._get_reason() if isinstance(error, HttpError) else str(error)
+        code = f' (HTTP {status})' if status else ''
+        super().__init__(f'{operation}{code}. {reason}\nПодробности: {detail[:600]}')
+
+
 class GoogleSheetsServiceAccount:
     """Класс для работы с Google Sheets API через Service Account"""
     
@@ -107,9 +125,8 @@ class GoogleSheetsServiceAccount:
             values = result.get('values', [])
             logger.info(f"Получено {len(values)} строк из таблицы")
             return values
-        except HttpError as error:
-            logger.error(f"Ошибка получения данных: {error}")
-            return []
+        except Exception as error:
+            raise GoogleSheetsAccessError('Ошибка чтения Google-таблицы', error) from error
     
     def update_sheet(self, spreadsheet_id: str, range_name: str, values: List[List[Any]]):
         """
@@ -157,9 +174,8 @@ class GoogleSheetsServiceAccount:
                 valueInputOption='RAW', insertDataOption='INSERT_ROWS', body=body).execute()
             logger.info(f"Добавлено {len(values)} строк")
             return result
-        except HttpError as error:
-            logger.error(f"Ошибка добавления данных: {error}")
-            return None
+        except Exception as error:
+            raise GoogleSheetsAccessError('Ошибка записи в Google-таблицу', error) from error
     
     def format_results_for_sheet(self, results: List[Dict]) -> List[List[Any]]:
         """
@@ -271,7 +287,8 @@ class GoogleSheetsServiceAccount:
             formatted_data = self.format_results_for_sheet(results)
             
             # Определяем диапазон для записи (20 столбцов: A-T)
-            range_name = f'{sheet_name}!A:T'
+            escaped_sheet_name = sheet_name.replace("'", "''")
+            range_name = f"'{escaped_sheet_name}'!A:T"
             
             # Добавляем данные в конец таблицы
             result = self.append_data(spreadsheet_id, range_name, formatted_data)
@@ -283,6 +300,8 @@ class GoogleSheetsServiceAccount:
                 logger.error("Ошибка загрузки результатов в таблицу")
                 return False
                 
+        except GoogleSheetsAccessError:
+            raise
         except Exception as e:
             logger.error(f"Ошибка загрузки результатов: {e}")
             return False

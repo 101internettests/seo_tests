@@ -8,14 +8,15 @@ import sys
 import argparse
 import logging
 import json
+import html
 import requests
 import time
 from datetime import datetime
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
-from google_sheets_service_account import GoogleSheetsServiceAccount
+from google_sheets_service_account import GoogleSheetsServiceAccount, GoogleSheetsAccessError
 from telegram_bot import TelegramBot
 
 # Логирование будет настроено в main()
@@ -311,6 +312,8 @@ class SEOParser:
                     else:
                         raise
 
+        except GoogleSheetsAccessError:
+            raise
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"Ошибка анализа {url}: {e}")
@@ -394,9 +397,12 @@ class SEOParser:
                 }
             
             # Получаем все данные из таблицы
-            range_name = f'{sheet_name}!A:T'
+            escaped_sheet_name = sheet_name.replace("'", "''")
+            range_name = f"'{escaped_sheet_name}'!A:T"
             try:
                 existing_data = self.sheets_manager.get_sheet_data(spreadsheet_id, range_name)
+            except GoogleSheetsAccessError:
+                raise
             except Exception as e:
                 logger.warning(f"Не удалось получить данные из Google Sheets: {e}")
                 return {
@@ -575,6 +581,8 @@ class SEOParser:
                     'errors': [f'Ошибка парсинга предыдущих данных: {e}']
                 }
                 
+        except GoogleSheetsAccessError:
+            raise
         except Exception as e:
             logger.error(f"Ошибка сравнения с предыдущими данными: {e}")
             return {
@@ -600,7 +608,8 @@ class MultiSiteAnalyzer:
         """
         self.sites_config_file = sites_config_file
         self.config = self.load_sites_config()
-        self.sheets_manager = GoogleSheetsServiceAccount()
+        # Подключаем Google перед прогоном, когда Telegram уже доступен для алерта.
+        self.sheets_manager = None
         
         # Инициализируем Telegram бота
         self.telegram_bot = TelegramBot()
@@ -627,6 +636,24 @@ class MultiSiteAnalyzer:
             request_timeout=request_timeout
         )
         
+    def check_google_sheets_access(self):
+        """Проверяем чтение целевого листа до первого запроса к сайтам."""
+        try:
+            settings = self.config['default_settings']
+            spreadsheet_id = settings.get('spreadsheet_id')
+            if not spreadsheet_id:
+                raise ValueError('Не указан spreadsheet_id в default_settings.')
+            if self.sheets_manager is None:
+                self.sheets_manager = GoogleSheetsServiceAccount()
+                self.parser.sheets_manager = self.sheets_manager
+            sheet_name = settings.get('sheet_name', 'Лист1').replace("'", "''")
+            self.sheets_manager.get_sheet_data(spreadsheet_id, f"'{sheet_name}'!A1")
+            logger.info('Доступ к Google-таблице проверен, начинаем анализ URL')
+        except GoogleSheetsAccessError:
+            raise
+        except Exception as error:
+            raise GoogleSheetsAccessError('Не удалось подключиться к Google-таблице', error) from error
+
     def load_sites_config(self) -> Dict:
         """Загрузка конфигурации сайтов"""
         if not os.path.exists(self.sites_config_file):
@@ -694,6 +721,8 @@ class MultiSiteAnalyzer:
         Returns:
             Словарь с результатами по сайтам
         """
+        self.check_google_sheets_access()
+
         # Определяем URL для анализа
         if custom_urls:
             urls_to_analyze = custom_urls
@@ -723,6 +752,8 @@ class MultiSiteAnalyzer:
                 result = self.parser.analyze_page(url)
                 sites_results[site_key]['results'].append(result)
                 logger.info(f"Проанализирована страница: {url}")
+            except GoogleSheetsAccessError:
+                raise
             except Exception as e:
                 logger.error(f"Ошибка анализа {url}: {e}")
                 sites_results[site_key]['results'].append({
@@ -874,9 +905,11 @@ class MultiSiteAnalyzer:
                 logger.info("Результаты успешно загружены в Google Sheets")
                 print("✅ Результаты успешно загружены в Google Sheets")
             else:
-                logger.error("Ошибка загрузки результатов в Google Sheets")
-                print("❌ Ошибка загрузки результатов в Google Sheets")
+                raise GoogleSheetsAccessError('Ошибка записи в Google-таблицу',
+                                             RuntimeError('Google Sheets не подтвердил сохранение результатов.'))
                 
+        except GoogleSheetsAccessError:
+            raise
         except Exception as e:
             logger.error(f"Ошибка загрузки в Google Sheets: {e}")
             print(f"❌ Ошибка загрузки в Google Sheets: {e}")
@@ -913,9 +946,11 @@ class MultiSiteAnalyzer:
         """Отправка уведомления об ошибке в Telegram"""
         try:
             if not self.telegram_bot.is_configured():
+                logger.error('Алерт не отправлен: Telegram не настроен')
                 return
             
-            self.telegram_bot.send_error_notification(error_message)
+            if not self.telegram_bot.send_error_notification(error_message):
+                logger.error('Не удалось доставить Telegram-алерт об остановке прогона')
             
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления об ошибке в Telegram: {e}")
@@ -936,6 +971,8 @@ class MultiSiteAnalyzer:
 
     def analyze_url(self, url: str) -> dict:
         """Анализ одной страницы (для тестов)"""
+        if self.sheets_manager is None:
+            self.check_google_sheets_access()
         result = self.parser.analyze_page(url)
         # Приводим результат к формату, ожидаемому тестами
         headings = result.get('headings', {})
@@ -1073,6 +1110,21 @@ def main():
         
         print(f"\n🎉 Анализ завершен успешно!")
             
+    except GoogleSheetsAccessError as error:
+        logger.error('Прогон остановлен: %s', error)
+        if not args.no_telegram:
+            settings = analyzer.config.get('default_settings', {})
+            spreadsheet_id = settings.get('spreadsheet_id') or ''
+            sheet_url = f'https://docs.google.com/spreadsheets/d/{quote(spreadsheet_id, safe="")}/edit'
+            link = f'🔗 <a href="{sheet_url}">Открыть Google-таблицу</a>' if spreadsheet_id else 'Ссылка отсутствует: не задан spreadsheet_id.'
+            analyzer.send_telegram_error(
+                '<b>❌ GOOGLE-ТАБЛИЦА НЕДОСТУПНА</b>\n\n'
+                f'{html.escape(str(error))}\n\n'
+                '<b>⛔ Прогон остановлен.</b> Дальнейшие проверки не выполняются; '
+                'успешный SEO-отчет не сформирован.\n\n'
+                f'{link}'
+            )
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\n⏹️ Анализ прерван пользователем")
         try:
